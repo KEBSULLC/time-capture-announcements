@@ -1,0 +1,20 @@
+{
+  "announcements": [
+    {
+      "id": "welcome-2026-05",
+      "severity": "info",
+      "audience": "all",
+      "min_version": null,
+      "max_version": null,
+      "title": "Welcome to Time Capture",
+      "body": "Thanks for trying Time Capture. We'd love your feedback as we get ready for our public launch.\n\nLet us know what's working, what's confusing, and what's missing.",
+      "links": [
+        {
+          "label": "Share feedback",
+          "url": "https://github.com/eulkloss/time-capture/issues/new"
+        }
+      ],
+      "published_at": "2026-05-14T00:00:00.000Z"
+    }
+  ]
+}
