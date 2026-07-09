@@ -12,26 +12,27 @@ export interface FeedResponse {
   feedPath: string;
   feedRel: string;
   exists: boolean;
+  /** 'origin' = loaded from the live published feed; 'working-tree' = local file. */
+  source: 'origin' | 'working-tree';
+  base: string;
+  fetched: boolean;
   git: GitInfo;
+}
+
+export interface MergeResult {
+  ok: boolean;
+  mode?: 'auto' | 'immediate';
+  reason?: string;
+  stage?: string;
+  branch?: string;
+  note?: string;
+  error?: string;
+  output?: string;
 }
 
 export interface SaveResult {
   ok: boolean;
   reason?: string;
-  validation?: FeedValidation;
-}
-
-export interface PublishResult {
-  ok: boolean;
-  stage?: string;
-  committed?: boolean;
-  pushed?: boolean;
-  reason?: string;
-  note?: string;
-  error?: string;
-  branch?: string;
-  message?: string;
-  output?: string;
   validation?: FeedValidation;
 }
 
@@ -66,18 +67,6 @@ export async function saveFeed(entries: AuthorEntry[]): Promise<SaveResult> {
   return res.json();
 }
 
-export async function publishFeed(
-  entries: AuthorEntry[],
-  message: string,
-): Promise<PublishResult> {
-  const res = await fetch('/api/publish', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ entries, message }),
-  });
-  return res.json();
-}
-
 export async function publishPr(
   entries: AuthorEntry[],
   message: string,
@@ -86,6 +75,15 @@ export async function publishPr(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ entries, message }),
+  });
+  return res.json();
+}
+
+export async function mergePr(branch: string): Promise<MergeResult> {
+  const res = await fetch('/api/merge-pr', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ branch }),
   });
   return res.json();
 }

@@ -18,9 +18,10 @@ a few minutes).
 
 | Slice | Detail |
 |-------|--------|
-| **Feed editor** | Loads the current `feed.json`, lists entries, and lets you **create / edit / delete / reorder** them. A form per entry covers every field (id, category, severity, audience, version range, links, dates) with live validation. |
+| **Feed editor** | Loads the **live published feed from `origin/main`** (fetched on open, so you edit what installs actually see), lists entries, and lets you **create / edit / delete / reorder** them. A form per entry covers every field (id, category, severity, audience, version range, links, dates) with live validation. A **↻ Refresh from main** button re-fetches on demand (with an unsaved-changes guard); a header badge shows **`live`** (fetch confirmed), **`cached (offline)`** (couldn't reach origin — possibly stale), or **`local file`**. |
 | **Preview** | Shows how the selected entry will behave in the app: `security` → **blocking modal** (all tiers); `ad` → **daily pop** (Lite ad-supported) with an Upgrade button; `general` → **inbox** item. Title/body render as **plain text** — no HTML injection, mirroring the app's safe render. Also shows which tiers the entry is visible to (severity/audience rules) and the version range. |
-| **Publish** | **Publish → open PR** writes `feed.json`, commits it on a short-lived `feed/update-<timestamp>` branch, pushes that branch, and opens a pull request into `main` (via the `gh` CLI if available, otherwise it returns a ready "open PR" link). It then returns your working tree to the branch you were on — nothing lands directly on `main`, so the `feed-check` gate always runs before merge. **Save feed.json** just writes the file (for a manual commit). Only `feed.json` is ever staged. |
+| **Publish** | **Publish → open PR** builds a `feed/update-<timestamp>` branch **off the latest `origin/main`** and opens a pull request into `main` (via the `gh` CLI if available, otherwise it returns a ready "open PR" link). Publishing **hard-fails if it can't `git fetch` the base** — it never builds a PR off a possibly-stale cached ref (which could silently revert newer entries once merged). It uses git plumbing containing **only** the `feed.json` change, so it **never touches your working tree or current branch**, can't pick up unrelated local commits, and nothing lands on `main` outside the `feed-check` gate. **Save feed.json** just writes the file to disk (for a manual commit). |
+| **Merge** | After a PR is opened (with `gh`), a **✓ Merge PR** button appears. It runs `gh pr merge --auto --squash --delete-branch`, which asks GitHub to merge **once `feed-check` passes** — it does **not** bypass the ruleset, so a feed that fails validation still can't be merged. Requires the `gh` CLI (authenticated) and **"Allow auto-merge"** enabled in the repo settings (Settings → General → Pull Requests). After it merges, click **↻ Refresh from main** to load the now-live feed. |
 
 The emitted JSON is deterministic (canonical key order, 2-space indent,
 trailing newline) so a bad publish is a one-line `git revert`.
@@ -29,7 +30,17 @@ trailing newline) so a bad publish is a one-line `git revert`.
 
 ## Run it
 
-Requires Node 20+ (works on 22).
+Requires [Node.js](https://nodejs.org/) 20+ (works on 22) and `git` on your PATH.
+
+**Easiest — double-click launcher** (no terminal needed after Node is installed):
+
+- **Windows:** double-click **`start-feed-manager.cmd`**
+- **macOS / Linux:** run **`./start-feed-manager.sh`**
+
+The launcher installs dependencies on first run, then starts the tool and opens
+it in your browser. Leave the window open while you use it; close it to stop.
+
+**Or from a terminal:**
 
 ```bash
 cd manager
@@ -37,15 +48,24 @@ npm install
 npm run dev
 ```
 
-This opens `http://localhost:4318`. The dev server (Vite) also serves the
-small API the UI talks to; there is no separate backend to start. By default
-it edits the `feed.json` in the parent directory (this repo's root) and runs
-git in that repo.
+Either way it opens `http://localhost:4318`. The dev server (Vite) also serves
+the small API the UI talks to; there is no separate backend to start. By
+default it edits the `feed.json` in the parent directory (this repo's root) and
+runs git in that repo.
+
+> **Is it an installed app?** No — it's a local web tool you launch on your own
+> machine (the double-click launcher gives it a one-click feel). It is
+> deliberately *not* packaged as a standalone `.exe`: it needs `git` (and,
+> for auto-open/merge, the `gh` CLI) present on the machine anyway, and a local
+> web UI keeps it a few small files instead of a bundled desktop app to
+> maintain. If a true installed binary is ever wanted, the UI + local API could
+> be wrapped in Tauri later, but it's overkill for an owner-only tool.
 
 Environment overrides (rarely needed):
 
 - `FEED_PATH` — absolute path to the `feed.json` to edit.
 - `REPO_ROOT` — absolute path to the git repo to commit/push in.
+- `BASE_BRANCH` — target/publish branch (default `main`).
 
 ### Security / operating assumptions
 
@@ -64,9 +84,12 @@ the owner's own machine:
 ### Publishing flow (branch → PR → merge)
 
 1. `npm run dev`, edit / add / reorder entries. Errors block publish; warnings
-   are advisory guardrails.
-2. Click **Publish → open PR**. The tool pushes a `feed/update-<timestamp>`
-   branch and opens (or links you to) a pull request into `main`.
+   are advisory guardrails. (The tool bases the PR on `origin/main`, so you
+   don't have to be on `main` or have it pulled — but pulling first keeps what
+   you see in the editor in step with the live feed.)
+2. Click **Publish → open PR**. The tool builds a `feed/update-<timestamp>`
+   branch off the latest `origin/main` and opens (or links you to) a pull
+   request into `main`.
 3. On the PR, the **`feed-check`** CI validates the feed. When it's green,
    **merge the PR**.
 4. GitHub Pages serves the new feed within a couple of minutes; running desktop
@@ -173,6 +196,16 @@ guidance):** add a branch ruleset on `main` requiring the `feed-check /
 validate` status check to pass, and blocking force-pushes and deletion. That
 turns the CI gate from an after-the-fact detector into a merge gate.
 
+> **Enable "Require branches to be up to date before merging" (strict status
+> checks).** Without it, two feed PRs opened from the same base can *both* pass
+> `feed-check` and merge in sequence — the second silently reverting the first
+> (a lost update). Strict mode forces the second PR to rebase onto the merged
+> `main` (and re-run `feed-check`) before it can merge, so nothing is
+> overwritten. For a solo author publishing one change at a time this is
+> invisible; it only asks you to **Update branch** when you deliberately have
+> two PRs open at once. (A GitHub *merge queue* solves the same problem and is
+> the better fit at higher volume, but it's overkill here.)
+
 ## Develop / test
 
 ```bash
@@ -182,18 +215,30 @@ npm run test:run    # vitest run (CI)
 npm run build       # typecheck + production bundle
 ```
 
-Tests live in `src/schema/__tests__/`: the schema round-trip, authoring
-validation rules, serialization stability, and a mirror of the app parser's own
-cases. CI (`.github/workflows/manager-ci.yml`, at the repo root) runs
-typecheck + tests + build on any change under `manager/`.
+Tests:
+
+- `src/schema/__tests__/` — the schema round-trip, authoring validation rules,
+  serialization stability, and a mirror of the app parser's own cases.
+- `server/__tests__/feedApi.integration.test.ts` — drives the real server
+  middleware against a throwaway git repo with a local bare "remote" (no
+  network, no `gh`): loading the feed from `origin/main`, publishing a PR
+  branch off `origin/main` that contains **only** `feed.json`, the no-changes
+  and invalid-feed paths, and that the working tree is never touched.
+
+CI (`.github/workflows/manager-ci.yml`, at the repo root) runs typecheck +
+tests + build on any change under `manager/`.
 
 ## Layout
 
 ```
 manager/
 ├── index.html
+├── start-feed-manager.cmd  # Windows double-click launcher
+├── start-feed-manager.sh   # macOS / Linux launcher
 ├── vite.config.ts          # Vite + the local feed API plugin
-├── server/feedApi.ts       # dev-server middleware: load / save / publish (git)
+├── server/
+│   ├── feedApi.ts          # dev-server middleware: load / save / publish / merge (git + gh)
+│   └── __tests__/          # integration test (real middleware + temp git repo)
 ├── scripts/check-feed.ts   # CI gate: validate feed.json against the schema
 └── src/
     ├── App.tsx             # editor shell + state

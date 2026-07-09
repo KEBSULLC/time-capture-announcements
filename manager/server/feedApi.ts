@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { Connect, Plugin, ViteDevServer } from 'vite';
 import type { ServerResponse } from 'node:http';
@@ -13,6 +14,8 @@ export interface FeedApiOptions {
   repoRoot: string;
   /** Absolute path to feed.json. Defaults to <repoRoot>/feed.json. */
   feedPath?: string;
+  /** Target/publish base branch. Defaults to "main". */
+  base?: string;
 }
 
 interface RunResult {
@@ -21,9 +24,19 @@ interface RunResult {
   stderr: string;
 }
 
-function run(cmd: string, args: string[], cwd: string): Promise<RunResult> {
+function run(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<RunResult> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { cwd, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const opts = {
+      cwd,
+      env: env ? { ...process.env, ...env } : process.env,
+      maxBuffer: 10 * 1024 * 1024,
+    };
+    execFile(cmd, args, opts, (error, stdout, stderr) => {
       const code =
         error && typeof (error as { code?: unknown }).code === 'number'
           ? (error as { code: number }).code
@@ -109,23 +122,53 @@ export function feedApi(options: FeedApiOptions): Plugin {
   const repoRoot = path.resolve(options.repoRoot);
   const feedPath = path.resolve(options.feedPath ?? path.join(repoRoot, 'feed.json'));
   const feedRel = path.relative(repoRoot, feedPath) || 'feed.json';
+  const feedGitPath = feedRel.split(path.sep).join('/');
+  const base = options.base?.trim() || 'main';
 
   const handlers: Record<
     string,
     (req: Connect.IncomingMessage, res: ServerResponse) => Promise<void>
   > = {
+    // Load the feed the editor should start from: the LIVE published feed on
+    // origin/<base>. We fetch first, then read origin/<base>:feed.json so the
+    // editor reflects what installs actually see — regardless of local
+    // working-tree state. Falls back to the local file when offline / not a
+    // repo / the file isn't on origin yet.
     'GET /api/feed': async (_req, res) => {
       let entries: AuthorEntry[] = [];
       let exists = true;
-      try {
-        const text = await fs.readFile(feedPath, 'utf-8');
-        entries = loadFeed(JSON.parse(text));
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === 'ENOENT') exists = false;
-        else throw e;
+      let source: 'origin' | 'working-tree' = 'working-tree';
+      let fetched = false;
+      let loaded = false;
+
+      const isRepo = (await run('git', ['rev-parse', '--is-inside-work-tree'], repoRoot)).code === 0;
+      if (isRepo) {
+        fetched = (await run('git', ['fetch', 'origin', base], repoRoot)).code === 0;
+        const show = await run('git', ['show', `origin/${base}:${feedGitPath}`], repoRoot);
+        if (show.code === 0) {
+          try {
+            entries = loadFeed(JSON.parse(show.stdout));
+            source = 'origin';
+            loaded = true;
+          } catch {
+            // malformed feed on origin — fall through to the working tree
+          }
+        }
       }
+
+      if (!loaded) {
+        try {
+          const text = await fs.readFile(feedPath, 'utf-8');
+          entries = loadFeed(JSON.parse(text));
+          source = 'working-tree';
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === 'ENOENT') exists = false;
+          else throw e;
+        }
+      }
+
       const git = await gitStatus(repoRoot, feedRel);
-      sendJson(res, 200, { entries, feedPath, feedRel, exists, git });
+      sendJson(res, 200, { entries, feedPath, feedRel, exists, source, base, fetched, git });
     },
 
     'GET /api/git-status': async (_req, res) => {
@@ -143,29 +186,32 @@ export function feedApi(options: FeedApiOptions): Plugin {
       sendJson(res, 200, { ok: true, feedPath, validation });
     },
 
-    // Publish via a short-lived branch + PR (Option C). Writes feed.json,
-    // creates a `feed/update-<ts>` branch off the current HEAD, commits +
-    // pushes it, and opens a PR into `base` (via `gh` if available, else it
-    // returns a ready compare URL). Leaves the working tree back on the
-    // original branch so nothing lands directly on main.
+    // Publish via a branch + PR (Option C). Builds the update branch off the
+    // TARGET BASE (origin/main), not the user's current branch, so the PR
+    // contains ONLY the feed.json change and never unrelated local commits.
+    // Uses git plumbing (blob → tree → commit → push a new ref), so the
+    // working tree and current branch are never touched at all.
     'POST /api/publish-pr': async (req, res) => {
       const body = (await readBody(req)) as {
         entries?: AuthorEntry[];
         message?: string;
-        base?: string;
       };
       const entries = Array.isArray(body.entries) ? body.entries : [];
       const message = (body.message ?? '').trim() || 'Update announcement feed';
-      const base = (body.base ?? '').trim() || 'main';
 
-      const { wrote, validation } = await writeFeed(feedPath, entries);
-      if (!wrote) {
+      // 1. Validate WITHOUT writing to disk (plumbing never dirties the tree).
+      const validation = validateFeed(entries);
+      if (validation.hasErrors) {
         sendJson(res, 400, { ok: false, stage: 'validation', validation });
         return;
       }
+      const content = serializeFeed(entries);
 
-      const status = await gitStatus(repoRoot, feedRel);
-      if (!status.isRepo) {
+      // 2. Must be a git repo. If not, at least write the file for the user.
+      const isRepo = (await run('git', ['rev-parse', '--is-inside-work-tree'], repoRoot)).code === 0;
+      if (!isRepo) {
+        await fs.mkdir(path.dirname(feedPath), { recursive: true });
+        await fs.writeFile(feedPath, content, 'utf-8');
         sendJson(res, 200, {
           ok: true,
           opened: false,
@@ -175,171 +221,221 @@ export function feedApi(options: FeedApiOptions): Plugin {
         return;
       }
 
-      const original = status.branch ?? 'HEAD';
-      const branch = `feed/update-${branchTimestamp()}`;
-
-      const checkout = await run('git', ['checkout', '-b', branch], repoRoot);
-      if (checkout.code !== 0) {
-        sendJson(res, 500, { ok: false, stage: 'branch', error: checkout.stderr || checkout.stdout });
-        return;
-      }
-
-      await run('git', ['add', '--', feedRel], repoRoot);
-      const staged = await run('git', ['diff', '--cached', '--quiet', '--', feedRel], repoRoot);
-      if (staged.code === 0) {
-        // Nothing changed — tear the branch back down and report cleanly.
-        await run('git', ['checkout', original], repoRoot);
-        await run('git', ['branch', '-D', branch], repoRoot);
-        sendJson(res, 200, {
-          ok: true,
-          opened: false,
-          reason: 'no-changes',
-          note: 'feed.json already matches HEAD; nothing to publish.',
-        });
-        return;
-      }
-
-      const commit = await run('git', ['commit', '-m', message, '--', feedRel], repoRoot);
-      if (commit.code !== 0) {
-        await run('git', ['checkout', '-f', original], repoRoot);
-        await run('git', ['branch', '-D', branch], repoRoot);
-        sendJson(res, 500, { ok: false, stage: 'commit', error: commit.stderr || commit.stdout });
-        return;
-      }
-
-      let push: RunResult | null = null;
-      const delays = [0, 2000, 4000, 8000, 16000];
-      for (let attempt = 0; attempt < delays.length; attempt++) {
-        if (delays[attempt]) await sleep(delays[attempt]!);
-        push = await run('git', ['push', '-u', 'origin', branch], repoRoot);
-        if (push.code === 0) break;
-      }
-
-      // Return the working tree to where the user was, regardless of push result.
-      await run('git', ['checkout', original], repoRoot);
-
-      if (!push || push.code !== 0) {
+      // 3. Fetch the base — this is a HARD requirement, not best-effort. If we
+      //    can't confirm the latest origin/<base>, we must NOT publish off a
+      //    possibly-stale cached ref (that could silently revert newer entries
+      //    once merged). Fail loudly and tell the user to retry.
+      const fetchRes = await run('git', ['fetch', 'origin', base], repoRoot);
+      if (fetchRes.code !== 0) {
         sendJson(res, 502, {
           ok: false,
-          stage: 'push',
-          branch,
-          error: push?.stderr || push?.stdout || 'push failed',
-          note: `The commit is on local branch ${branch} — push it and open a PR manually.`,
+          stage: 'fetch',
+          error: (fetchRes.stderr || fetchRes.stdout || 'git fetch failed').trim(),
+          note: `Could not fetch origin/${base}, so the base may be stale — refusing to publish to avoid reverting newer entries. Check your connection and try again.`,
         });
         return;
       }
-
-      // Resolve owner/repo from the origin remote for the PR / compare URL.
-      const remote = await run('git', ['remote', 'get-url', 'origin'], repoRoot);
-      const ownerRepo = remote.code === 0 ? parseOwnerRepo(remote.stdout.trim()) : null;
-      const cmp = compareUrl(ownerRepo, base, branch);
-
-      // Try to open the PR with the GitHub CLI; fall back to the compare URL.
-      let prUrl: string | null = null;
-      let ghError: string | null = null;
-      const ghArgs = ['pr', 'create', '--base', base, '--head', branch, '--title', message, '--body', `Automated feed update from the Feed Manager.\n\nBranch: ${branch}`];
-      if (ownerRepo) ghArgs.push('--repo', ownerRepo);
-      const gh = await run('gh', ghArgs, repoRoot);
-      if (gh.code === 0) {
-        prUrl = gh.stdout.trim().split('\n').filter(Boolean).pop() ?? null;
-      } else {
-        ghError = (gh.stderr || gh.stdout || '').trim() || null;
+      // After a successful fetch, the base MUST be the freshly-fetched remote
+      // ref (never a local branch that could have diverged).
+      const baseRes = await run(
+        'git',
+        ['rev-parse', '--verify', '--quiet', `origin/${base}^{commit}`],
+        repoRoot,
+      );
+      const baseSha = baseRes.code === 0 ? baseRes.stdout.trim() : '';
+      if (!baseSha) {
+        sendJson(res, 500, {
+          ok: false,
+          stage: 'base',
+          error: `origin/${base} not found after fetch — does the "${base}" branch exist on origin?`,
+        });
+        return;
       }
+      const baseTree = (await run('git', ['rev-parse', `${baseSha}^{tree}`], repoRoot)).stdout.trim();
 
-      sendJson(res, 200, {
-        ok: true,
-        opened: prUrl !== null,
-        branch,
-        base,
-        url: prUrl ?? cmp,
-        isCompare: prUrl === null,
-        note:
-          prUrl !== null
-            ? 'Pull request opened. feed-check will validate it; merge when green.'
-            : cmp
-              ? 'Branch pushed. Open the pull request from the link (gh CLI not available or not authed).'
-              : `Branch ${branch} pushed. Open a PR into ${base} manually.`,
-        ghError,
-      });
+      // 4. Build the commit off baseSha in a scratch index — never touch HEAD.
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'feed-mgr-'));
+      const tmpFeed = path.join(tmpDir, 'feed.json');
+      const idxEnv: NodeJS.ProcessEnv = { GIT_INDEX_FILE: path.join(tmpDir, 'index') };
+      const idxPath = feedGitPath;
+      try {
+        await fs.writeFile(tmpFeed, content, 'utf-8');
+        const blobRes = await run('git', ['hash-object', '-w', tmpFeed], repoRoot);
+        if (blobRes.code !== 0) {
+          sendJson(res, 500, { ok: false, stage: 'blob', error: blobRes.stderr || blobRes.stdout });
+          return;
+        }
+        const blob = blobRes.stdout.trim();
+
+        const rt = await run('git', ['read-tree', baseSha], repoRoot, idxEnv);
+        if (rt.code !== 0) {
+          sendJson(res, 500, { ok: false, stage: 'read-tree', error: rt.stderr || rt.stdout });
+          return;
+        }
+        const ui = await run(
+          'git',
+          ['update-index', '--add', '--cacheinfo', `100644,${blob},${idxPath}`],
+          repoRoot,
+          idxEnv,
+        );
+        if (ui.code !== 0) {
+          sendJson(res, 500, { ok: false, stage: 'update-index', error: ui.stderr || ui.stdout });
+          return;
+        }
+        const wt = await run('git', ['write-tree'], repoRoot, idxEnv);
+        if (wt.code !== 0) {
+          sendJson(res, 500, { ok: false, stage: 'write-tree', error: wt.stderr || wt.stdout });
+          return;
+        }
+        const newTree = wt.stdout.trim();
+
+        // 5. No change vs base? Then there's nothing to publish.
+        if (newTree === baseTree) {
+          sendJson(res, 200, {
+            ok: true,
+            opened: false,
+            reason: 'no-changes',
+            note: `feed.json already matches ${base}; nothing to publish.`,
+          });
+          return;
+        }
+
+        const ct = await run('git', ['commit-tree', newTree, '-p', baseSha, '-m', message], repoRoot);
+        if (ct.code !== 0) {
+          sendJson(res, 500, { ok: false, stage: 'commit', error: ct.stderr || ct.stdout });
+          return;
+        }
+        const commitSha = ct.stdout.trim();
+
+        // 6. Push the new commit straight to a fresh branch ref on origin.
+        const branch = `feed/update-${branchTimestamp()}`;
+        let push: RunResult | null = null;
+        const delays = [0, 2000, 4000, 8000, 16000];
+        for (let attempt = 0; attempt < delays.length; attempt++) {
+          if (delays[attempt]) await sleep(delays[attempt]!);
+          push = await run('git', ['push', 'origin', `${commitSha}:refs/heads/${branch}`], repoRoot);
+          if (push.code === 0) break;
+        }
+        if (!push || push.code !== 0) {
+          sendJson(res, 502, {
+            ok: false,
+            stage: 'push',
+            branch,
+            error: push?.stderr || push?.stdout || 'push failed',
+            note: `Commit ${commitSha} is in your local object store — push it to ${branch} and open a PR manually.`,
+          });
+          return;
+        }
+
+        // 7. Resolve owner/repo for the PR / compare URL.
+        const remote = await run('git', ['remote', 'get-url', 'origin'], repoRoot);
+        const ownerRepo = remote.code === 0 ? parseOwnerRepo(remote.stdout.trim()) : null;
+        const cmp = compareUrl(ownerRepo, base, branch);
+
+        // 8. Try to open the PR with the GitHub CLI; fall back to compare URL.
+        let prUrl: string | null = null;
+        let ghError: string | null = null;
+        const ghArgs = [
+          'pr',
+          'create',
+          '--base',
+          base,
+          '--head',
+          branch,
+          '--title',
+          message,
+          '--body',
+          `Automated feed update from the Feed Manager.\n\nBranch: ${branch}`,
+        ];
+        if (ownerRepo) ghArgs.push('--repo', ownerRepo);
+        const gh = await run('gh', ghArgs, repoRoot);
+        if (gh.code === 0) {
+          prUrl = gh.stdout.trim().split('\n').filter(Boolean).pop() ?? null;
+        } else {
+          ghError = (gh.stderr || gh.stdout || '').trim() || null;
+        }
+
+        sendJson(res, 200, {
+          ok: true,
+          opened: prUrl !== null,
+          branch,
+          base,
+          url: prUrl ?? cmp,
+          isCompare: prUrl === null,
+          note:
+            prUrl !== null
+              ? 'Pull request opened. feed-check will validate it; merge when green.'
+              : cmp
+                ? 'Branch pushed. Open the pull request from the link (gh CLI not available or not authed).'
+                : `Branch ${branch} pushed. Open a PR into ${base} manually.`,
+          ghError,
+        });
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
     },
 
-    'POST /api/publish': async (req, res) => {
-      const body = (await readBody(req)) as { entries?: AuthorEntry[]; message?: string };
-      const entries = Array.isArray(body.entries) ? body.entries : [];
-      const message = (body.message ?? '').trim() || 'Update announcement feed';
-
-      const { wrote, validation } = await writeFeed(feedPath, entries);
-      if (!wrote) {
-        sendJson(res, 400, { ok: false, stage: 'validation', validation });
+    // Merge an open feed PR into the base. Uses `gh pr merge --auto`, which
+    // asks GitHub to merge ONLY once all required checks (feed-check) pass —
+    // so the ruleset gate is fully preserved; this never bypasses it. Requires
+    // the `gh` CLI (authenticated) and, for --auto, "Allow auto-merge" enabled
+    // on the repo (falls back to an immediate merge, which only succeeds if the
+    // PR is already green).
+    'POST /api/merge-pr': async (req, res) => {
+      const body = (await readBody(req)) as { branch?: string };
+      const branch = (body.branch ?? '').trim();
+      if (!branch) {
+        sendJson(res, 400, { ok: false, error: 'branch is required' });
         return;
       }
 
-      const status = await gitStatus(repoRoot, feedRel);
-      if (!status.isRepo) {
+      const ghVer = await run('gh', ['--version'], repoRoot);
+      if (ghVer.code !== 0) {
         sendJson(res, 200, {
-          ok: true,
-          committed: false,
-          pushed: false,
-          reason: 'not-a-git-repo',
-          note: 'feed.json was written; commit and push it manually.',
-        });
-        return;
-      }
-
-      // Stage ONLY feed.json — never sweep unrelated working-tree changes.
-      const add = await run('git', ['add', '--', feedRel], repoRoot);
-      if (add.code !== 0) {
-        sendJson(res, 500, { ok: false, stage: 'add', error: add.stderr || add.stdout });
-        return;
-      }
-
-      // Anything staged? (exit 1 => staged diff present)
-      const staged = await run('git', ['diff', '--cached', '--quiet', '--', feedRel], repoRoot);
-      if (staged.code === 0) {
-        sendJson(res, 200, {
-          ok: true,
-          committed: false,
-          pushed: false,
-          reason: 'no-changes',
-          note: 'feed.json is already up to date with HEAD; nothing to publish.',
-        });
-        return;
-      }
-
-      const commit = await run('git', ['commit', '-m', message, '--', feedRel], repoRoot);
-      if (commit.code !== 0) {
-        sendJson(res, 500, { ok: false, stage: 'commit', error: commit.stderr || commit.stdout });
-        return;
-      }
-
-      const branch = status.branch ?? 'HEAD';
-      let push: RunResult | null = null;
-      const delays = [0, 2000, 4000, 8000, 16000];
-      for (let attempt = 0; attempt < delays.length; attempt++) {
-        if (delays[attempt]) await sleep(delays[attempt]!);
-        push = await run('git', ['push', '-u', 'origin', branch], repoRoot);
-        if (push.code === 0) break;
-      }
-
-      if (!push || push.code !== 0) {
-        sendJson(res, 502, {
           ok: false,
-          stage: 'push',
-          committed: true,
-          pushed: false,
-          error: push?.stderr || push?.stdout || 'push failed',
-          note: 'The commit is on your local branch — retry the push or push manually.',
+          reason: 'no-gh',
+          note: 'The GitHub CLI (gh) is not installed or not authenticated — merge the PR on GitHub.',
+        });
+        return;
+      }
+
+      const remote = await run('git', ['remote', 'get-url', 'origin'], repoRoot);
+      const ownerRepo = remote.code === 0 ? parseOwnerRepo(remote.stdout.trim()) : null;
+      const repoArgs = ownerRepo ? ['--repo', ownerRepo] : [];
+      const mergeArgs = ['pr', 'merge', branch, '--squash', '--delete-branch', ...repoArgs];
+
+      let mode: 'auto' | 'immediate' = 'auto';
+      let merge = await run('gh', [...mergeArgs, '--auto'], repoRoot);
+      // If the repo doesn't allow auto-merge, retry an immediate merge (only
+      // succeeds if checks already passed).
+      if (merge.code !== 0 && /auto[- ]?merge/i.test(`${merge.stderr}${merge.stdout}`)) {
+        mode = 'immediate';
+        merge = await run('gh', mergeArgs, repoRoot);
+      }
+
+      if (merge.code !== 0) {
+        sendJson(res, 200, {
+          ok: false,
+          stage: 'merge',
+          mode,
+          branch,
+          error: (merge.stderr || merge.stdout || 'merge failed').trim(),
+          note: 'GitHub refused the merge. If feed-check is still running the PR merges when it passes (enable "Allow auto-merge" in repo settings); otherwise resolve the reported blocker on the PR.',
         });
         return;
       }
 
       sendJson(res, 200, {
         ok: true,
-        committed: true,
-        pushed: true,
+        mode,
         branch,
-        message,
-        output: push.stdout || push.stderr,
+        note:
+          mode === 'auto'
+            ? 'Auto-merge enabled — GitHub will merge into ' +
+              base +
+              ' once feed-check passes, then delete the branch.'
+            : 'PR merged into ' + base + ' and branch deleted.',
+        output: (merge.stdout || merge.stderr || '').trim(),
       });
     },
   };
