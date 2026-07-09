@@ -24,6 +24,7 @@ export function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [source, setSource] = useState<FeedResponse['source']>('working-tree');
   const [base, setBase] = useState('main');
+  const [fetched, setFetched] = useState(false);
   const [pendingPr, setPendingPr] = useState<{ branch: string; url?: string } | null>(null);
 
   const applyFeed = (res: FeedResponse) => {
@@ -32,9 +33,15 @@ export function App() {
     setFeedRel(res.feedRel);
     setSource(res.source);
     setBase(res.base);
+    setFetched(res.fetched);
     setSavedSnapshot(serializeFeed(res.entries));
     setSelectedIndex(res.entries.length > 0 ? 0 : -1);
   };
+
+  // 'live' only when we confirmed the latest base by fetching; 'cached' when we
+  // fell back to a possibly-stale local origin ref (offline).
+  const liveState: 'live' | 'cached' | 'local' =
+    source === 'origin' ? (fetched ? 'live' : 'cached') : 'local';
 
   useEffect(() => {
     getFeed()
@@ -120,7 +127,7 @@ export function App() {
       } else {
         setStatus({
           kind: 'error',
-          text: `Publish failed at ${res.stage ?? '?'}: ${res.error ?? res.note ?? 'unknown error'}`,
+          text: res.note ?? `Publish failed at ${res.stage ?? '?'}: ${res.error ?? 'unknown error'}`,
         });
       }
     } catch (e) {
@@ -137,13 +144,20 @@ export function App() {
     try {
       const res = await getFeed();
       applyFeed(res);
-      setStatus({
-        kind: 'info',
-        text:
-          res.source === 'origin'
-            ? `Reloaded from origin/${res.base}${res.fetched ? ' (fetched)' : ''}.`
-            : 'Reloaded from the local file (origin not reachable).',
-      });
+      setStatus(
+        res.source === 'origin' && !res.fetched
+          ? {
+              kind: 'error',
+              text: `Could not reach origin — showing a cached copy of origin/${res.base}. You're offline; refresh again before publishing.`,
+            }
+          : {
+              kind: 'info',
+              text:
+                res.source === 'origin'
+                  ? `Reloaded the live feed from origin/${res.base}.`
+                  : 'Reloaded from the local file (no origin available).',
+            },
+      );
     } catch (e) {
       setStatus({ kind: 'error', text: (e as Error).message });
     } finally {
@@ -199,8 +213,19 @@ export function App() {
         <h1>Time Capture — Announcement Feed Manager</h1>
         <span className="muted">author &amp; publish {feedRel}</span>
         <div className="header-right">
-          <span className="muted small" title="Where the editor loaded the feed from">
-            {source === 'origin' ? `live: origin/${base}` : 'local file'}
+          <span
+            className={`source-badge ${liveState}`}
+            title={
+              liveState === 'cached'
+                ? `Could not reach origin — showing a cached copy of origin/${base}. Refresh before publishing.`
+                : 'Where the editor loaded the feed from'
+            }
+          >
+            {liveState === 'live'
+              ? `live: origin/${base}`
+              : liveState === 'cached'
+                ? `cached: origin/${base} (offline)`
+                : 'local file'}
           </span>
           <button className="btn" onClick={reloadFromMain} disabled={busy} title="Fetch and reload the latest feed from the base branch">
             ↻ Refresh from {base}

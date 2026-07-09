@@ -176,4 +176,18 @@ describe('feedApi integration (real middleware + temp git repo)', () => {
     const { status } = await call('POST', '/api/merge-pr', {});
     expect(status).toBe(400);
   });
+
+  // Keep this LAST — it removes the remote, which later tests would need.
+  it('refuses to publish when the base cannot be fetched (stale-base guard)', async () => {
+    git(work, 'remote', 'remove', 'origin');
+    const entries = [
+      entry({ id: 'seed', title: 'Seed entry' }),
+      entry({ id: 'would-revert', title: 'X' }),
+    ];
+    const { body } = await call('POST', '/api/publish-pr', { entries, message: 'should fail' });
+    expect(body.ok).toBe(false);
+    expect(body.stage).toBe('fetch');
+    // and nothing was created locally
+    expect(git(work, 'branch', '--list', 'feed/*')).toBe('');
+  });
 });

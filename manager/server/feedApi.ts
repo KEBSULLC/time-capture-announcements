@@ -221,21 +221,33 @@ export function feedApi(options: FeedApiOptions): Plugin {
         return;
       }
 
-      // 3. Resolve the base commit — prefer origin/<base> (freshly fetched).
-      await run('git', ['fetch', 'origin', base], repoRoot); // best effort
-      let baseSha = '';
-      for (const ref of [`origin/${base}`, base]) {
-        const r = await run('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], repoRoot);
-        if (r.code === 0 && r.stdout.trim()) {
-          baseSha = r.stdout.trim();
-          break;
-        }
+      // 3. Fetch the base — this is a HARD requirement, not best-effort. If we
+      //    can't confirm the latest origin/<base>, we must NOT publish off a
+      //    possibly-stale cached ref (that could silently revert newer entries
+      //    once merged). Fail loudly and tell the user to retry.
+      const fetchRes = await run('git', ['fetch', 'origin', base], repoRoot);
+      if (fetchRes.code !== 0) {
+        sendJson(res, 502, {
+          ok: false,
+          stage: 'fetch',
+          error: (fetchRes.stderr || fetchRes.stdout || 'git fetch failed').trim(),
+          note: `Could not fetch origin/${base}, so the base may be stale — refusing to publish to avoid reverting newer entries. Check your connection and try again.`,
+        });
+        return;
       }
+      // After a successful fetch, the base MUST be the freshly-fetched remote
+      // ref (never a local branch that could have diverged).
+      const baseRes = await run(
+        'git',
+        ['rev-parse', '--verify', '--quiet', `origin/${base}^{commit}`],
+        repoRoot,
+      );
+      const baseSha = baseRes.code === 0 ? baseRes.stdout.trim() : '';
       if (!baseSha) {
         sendJson(res, 500, {
           ok: false,
           stage: 'base',
-          error: `cannot resolve base branch "${base}" (no origin/${base} or local ${base}).`,
+          error: `origin/${base} not found after fetch — does the "${base}" branch exist on origin?`,
         });
         return;
       }
