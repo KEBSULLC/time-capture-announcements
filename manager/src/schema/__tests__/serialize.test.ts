@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { AuthorEntry } from '../types.js';
 import { emptyEntry } from '../types.js';
 import { serializeFeed, loadFeed } from '../serialize.js';
+import { validateEntry } from '../authoring.js';
 
 function entry(overrides: Partial<AuthorEntry> = {}): AuthorEntry {
   return { ...emptyEntry('id-1'), title: 'T', publishedAt: '2026-07-03T00:00:00.000Z', ...overrides };
@@ -65,10 +66,24 @@ describe('loadFeed', () => {
     expect(e!.publishedAt).toBe('2026-01-01T00:00:00.000Z');
   });
 
-  it('coerces unknown enum values to defaults (surfaced later by the validator)', () => {
-    const [e] = loadFeed([{ id: 'a', title: 'X', category: 'bogus', severity: 'nope', audience: 'weird' }]);
-    expect(e!.category).toBe('general');
-    expect(e!.severity).toBe('info');
-    expect(e!.audience).toBe('all');
+  it('defaults ABSENT enum fields but PRESERVES present-but-invalid ones for the validator', () => {
+    // absent → default (lets a pre-Build-18 feed with no category open cleanly)
+    const [absent] = loadFeed([{ id: 'a', title: 'X' }]);
+    expect(absent!.category).toBe('general');
+    expect(absent!.severity).toBe('info');
+    expect(absent!.audience).toBe('all');
+
+    // present-but-invalid → kept verbatim (NOT silently rewritten to a default)
+    const [bad] = loadFeed([
+      { id: 'b', title: 'X', category: 'secirty', severity: 'nope', audience: 'weird' },
+    ]);
+    expect(bad!.category).toBe('secirty');
+    expect(bad!.severity).toBe('nope');
+    expect(bad!.audience).toBe('weird');
+
+    // ...and the validator flags each invalid value as a blocking error
+    const errs = validateEntry(bad!, new Set()).filter((i) => i.level === 'error');
+    const fields = errs.map((i) => i.field);
+    expect(fields).toEqual(expect.arrayContaining(['category', 'severity', 'audience']));
   });
 });

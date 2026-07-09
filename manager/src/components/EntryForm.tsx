@@ -8,6 +8,21 @@ interface Props {
   onChange: (patch: Partial<AuthorEntry>) => void;
 }
 
+/**
+ * Options for an enum <select>. If the current value isn't one of the valid
+ * options (e.g. a hand-edited feed had `category: "secirty"`), it is shown as
+ * an extra "(invalid — fix)" option so the author can see the flagged value
+ * rather than the select silently snapping to the first option.
+ */
+function optionsFor(current: string, valid: readonly string[]) {
+  const list = current && !valid.includes(current) ? [current, ...valid] : valid;
+  return list.map((v) => (
+    <option key={v} value={v}>
+      {valid.includes(v) ? v : `${v} (invalid — fix)`}
+    </option>
+  ));
+}
+
 function FieldIssues({ issues, field }: { issues: Issue[]; field: string }) {
   const mine = issues.filter((i) => i.field === field);
   if (mine.length === 0) return null;
@@ -53,11 +68,7 @@ export function EntryForm({ entry, issues, onChange }: Props) {
             value={entry.category}
             onChange={(e) => onChange({ category: e.target.value as AuthorEntry['category'] })}
           >
-            {CATEGORIES.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
+            {optionsFor(entry.category, CATEGORIES)}
           </select>
           <FieldIssues issues={issues} field="category" />
         </label>
@@ -68,11 +79,7 @@ export function EntryForm({ entry, issues, onChange }: Props) {
             value={entry.severity}
             onChange={(e) => onChange({ severity: e.target.value as AuthorEntry['severity'] })}
           >
-            {SEVERITIES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
+            {optionsFor(entry.severity, SEVERITIES)}
           </select>
           <FieldIssues issues={issues} field="severity" />
         </label>
@@ -83,11 +90,7 @@ export function EntryForm({ entry, issues, onChange }: Props) {
             value={entry.audience}
             onChange={(e) => onChange({ audience: e.target.value as AuthorEntry['audience'] })}
           >
-            {AUDIENCES.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
+            {optionsFor(entry.audience, AUDIENCES)}
           </select>
           <FieldIssues issues={issues} field="audience" />
         </label>

@@ -47,6 +47,20 @@ Environment overrides (rarely needed):
 - `FEED_PATH` — absolute path to the `feed.json` to edit.
 - `REPO_ROOT` — absolute path to the git repo to commit/push in.
 
+### Security / operating assumptions
+
+This is a **local, single-user** tool. The dev server exposes API endpoints
+that **write, commit, and push `feed.json`**, so it is intended to run only on
+the owner's own machine:
+
+- Vite binds to **`localhost`** by default — do **not** run it with `--host` /
+  `server.host`, which would expose those write/publish endpoints on your
+  network.
+- There is no auth in the tool; the security boundary is **git push
+  permission** to this repo (see the root README's threat model), not the tool.
+- Dependencies are kept current (`npm audit` is clean; the toolchain tracks
+  Vite/Vitest majors). Run `npm audit` after dependency bumps.
+
 ### Publishing flow
 
 1. `npm run dev`, edit / add / reorder entries. Errors block save; warnings are

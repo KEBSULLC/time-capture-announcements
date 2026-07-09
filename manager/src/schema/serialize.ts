@@ -1,5 +1,4 @@
 import type { AuthorEntry } from './types.js';
-import { CATEGORIES, AUDIENCES, SEVERITIES } from './types.js';
 
 /**
  * On-disk (snake_case) shape of a single feed entry. Key ORDER here is the
@@ -46,20 +45,30 @@ export function serializeFeed(entries: AuthorEntry[]): string {
   return JSON.stringify(payload, null, 2) + '\n';
 }
 
-function coerce<T extends string>(v: unknown, valid: readonly T[], fallback: T): T {
-  return typeof v === 'string' && (valid as readonly string[]).includes(v) ? (v as T) : fallback;
-}
-
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
 /**
+ * Load an enum-typed field WITHOUT silently rewriting a bad value. An ABSENT
+ * field (missing / non-string / blank) becomes the default — this is what lets
+ * a pre-Build-18 feed (no `category` at all) open cleanly. But a value that is
+ * PRESENT yet invalid (e.g. `category: "secirty"`) is preserved verbatim so
+ * `validateEntry` flags it as an error, rather than being coerced to a
+ * valid-but-wrong default and published silently.
+ */
+function loadEnum<T extends string>(v: unknown, fallback: T): T {
+  if (typeof v !== 'string') return fallback;
+  const t = v.trim();
+  return (t || fallback) as T;
+}
+
+/**
  * Load an on-disk feed payload into the editor's AuthorEntry[]. Lenient (so a
- * hand-edited or older feed still opens) but does NOT silently rewrite values:
- * unknown enum values fall back to a default and are surfaced by the validator
- * for the author to fix, rather than being dropped. Both snake_case and
- * camelCase inputs are accepted, mirroring the app parser's tolerance.
+ * hand-edited or older feed still opens) but does NOT silently rewrite an
+ * invalid enum value: an absent enum defaults, while a present-but-invalid one
+ * is preserved so the validator surfaces it for the author to fix. Both
+ * snake_case and camelCase inputs are accepted, mirroring the app parser.
  */
 export function loadFeed(raw: unknown): AuthorEntry[] {
   const list = Array.isArray(raw)
@@ -76,9 +85,9 @@ export function loadFeed(raw: unknown): AuthorEntry[] {
       const rawLinks = Array.isArray(r.links) ? r.links : [];
       return {
         id: str(r.id).trim(),
-        category: coerce(r.category, CATEGORIES, 'general'),
-        severity: coerce(r.severity, SEVERITIES, 'info'),
-        audience: coerce(r.audience, AUDIENCES, 'all'),
+        category: loadEnum(r.category, 'general'),
+        severity: loadEnum(r.severity, 'info'),
+        audience: loadEnum(r.audience, 'all'),
         minVersion: minVersion || null,
         maxVersion: maxVersion || null,
         title: str(r.title),
