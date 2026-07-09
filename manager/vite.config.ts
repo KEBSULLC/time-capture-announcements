@@ -13,7 +13,7 @@ const feedPath = process.env.FEED_PATH
   : path.join(repoRoot, 'feed.json');
 
 export default defineConfig({
-  plugins: [react(), feedApi({ repoRoot, feedPath })],
+  plugins: [react(), feedApi({ repoRoot, feedPath, base: process.env.BASE_BRANCH })],
   server: {
     port: 4318,
     open: true,

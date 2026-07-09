@@ -12,6 +12,8 @@ interface Props {
   onMessage: (m: string) => void;
   onSave: () => void;
   onPublish: () => void;
+  canMerge: boolean;
+  onMerge: () => void;
 }
 
 export function PublishBar({
@@ -26,6 +28,8 @@ export function PublishBar({
   onMessage,
   onSave,
   onPublish,
+  canMerge,
+  onMerge,
 }: Props) {
   const blocked = errorCount > 0;
   return (
@@ -70,6 +74,17 @@ export function PublishBar({
           {busy ? 'Working…' : 'Publish → open PR'}
         </button>
       </div>
+
+      {canMerge && (
+        <button
+          className="btn merge"
+          disabled={busy}
+          onClick={onMerge}
+          title="Ask GitHub to merge the PR once feed-check passes (auto-merge)"
+        >
+          ✓ Merge PR into main (when checks pass)
+        </button>
+      )}
 
       {blocked && (
         <p className="muted small">Fix all errors before saving or publishing.</p>

@@ -14,6 +14,8 @@ export interface FeedApiOptions {
   repoRoot: string;
   /** Absolute path to feed.json. Defaults to <repoRoot>/feed.json. */
   feedPath?: string;
+  /** Target/publish base branch. Defaults to "main". */
+  base?: string;
 }
 
 interface RunResult {
@@ -120,23 +122,53 @@ export function feedApi(options: FeedApiOptions): Plugin {
   const repoRoot = path.resolve(options.repoRoot);
   const feedPath = path.resolve(options.feedPath ?? path.join(repoRoot, 'feed.json'));
   const feedRel = path.relative(repoRoot, feedPath) || 'feed.json';
+  const feedGitPath = feedRel.split(path.sep).join('/');
+  const base = options.base?.trim() || 'main';
 
   const handlers: Record<
     string,
     (req: Connect.IncomingMessage, res: ServerResponse) => Promise<void>
   > = {
+    // Load the feed the editor should start from: the LIVE published feed on
+    // origin/<base>. We fetch first, then read origin/<base>:feed.json so the
+    // editor reflects what installs actually see — regardless of local
+    // working-tree state. Falls back to the local file when offline / not a
+    // repo / the file isn't on origin yet.
     'GET /api/feed': async (_req, res) => {
       let entries: AuthorEntry[] = [];
       let exists = true;
-      try {
-        const text = await fs.readFile(feedPath, 'utf-8');
-        entries = loadFeed(JSON.parse(text));
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === 'ENOENT') exists = false;
-        else throw e;
+      let source: 'origin' | 'working-tree' = 'working-tree';
+      let fetched = false;
+      let loaded = false;
+
+      const isRepo = (await run('git', ['rev-parse', '--is-inside-work-tree'], repoRoot)).code === 0;
+      if (isRepo) {
+        fetched = (await run('git', ['fetch', 'origin', base], repoRoot)).code === 0;
+        const show = await run('git', ['show', `origin/${base}:${feedGitPath}`], repoRoot);
+        if (show.code === 0) {
+          try {
+            entries = loadFeed(JSON.parse(show.stdout));
+            source = 'origin';
+            loaded = true;
+          } catch {
+            // malformed feed on origin — fall through to the working tree
+          }
+        }
       }
+
+      if (!loaded) {
+        try {
+          const text = await fs.readFile(feedPath, 'utf-8');
+          entries = loadFeed(JSON.parse(text));
+          source = 'working-tree';
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === 'ENOENT') exists = false;
+          else throw e;
+        }
+      }
+
       const git = await gitStatus(repoRoot, feedRel);
-      sendJson(res, 200, { entries, feedPath, feedRel, exists, git });
+      sendJson(res, 200, { entries, feedPath, feedRel, exists, source, base, fetched, git });
     },
 
     'GET /api/git-status': async (_req, res) => {
@@ -163,11 +195,9 @@ export function feedApi(options: FeedApiOptions): Plugin {
       const body = (await readBody(req)) as {
         entries?: AuthorEntry[];
         message?: string;
-        base?: string;
       };
       const entries = Array.isArray(body.entries) ? body.entries : [];
       const message = (body.message ?? '').trim() || 'Update announcement feed';
-      const base = (body.base ?? '').trim() || 'main';
 
       // 1. Validate WITHOUT writing to disk (plumbing never dirties the tree).
       const validation = validateFeed(entries);
@@ -215,7 +245,7 @@ export function feedApi(options: FeedApiOptions): Plugin {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'feed-mgr-'));
       const tmpFeed = path.join(tmpDir, 'feed.json');
       const idxEnv: NodeJS.ProcessEnv = { GIT_INDEX_FILE: path.join(tmpDir, 'index') };
-      const idxPath = feedRel.split(path.sep).join('/');
+      const idxPath = feedGitPath;
       try {
         await fs.writeFile(tmpFeed, content, 'utf-8');
         const blobRes = await run('git', ['hash-object', '-w', tmpFeed], repoRoot);
@@ -331,6 +361,70 @@ export function feedApi(options: FeedApiOptions): Plugin {
       } finally {
         await fs.rm(tmpDir, { recursive: true, force: true });
       }
+    },
+
+    // Merge an open feed PR into the base. Uses `gh pr merge --auto`, which
+    // asks GitHub to merge ONLY once all required checks (feed-check) pass —
+    // so the ruleset gate is fully preserved; this never bypasses it. Requires
+    // the `gh` CLI (authenticated) and, for --auto, "Allow auto-merge" enabled
+    // on the repo (falls back to an immediate merge, which only succeeds if the
+    // PR is already green).
+    'POST /api/merge-pr': async (req, res) => {
+      const body = (await readBody(req)) as { branch?: string };
+      const branch = (body.branch ?? '').trim();
+      if (!branch) {
+        sendJson(res, 400, { ok: false, error: 'branch is required' });
+        return;
+      }
+
+      const ghVer = await run('gh', ['--version'], repoRoot);
+      if (ghVer.code !== 0) {
+        sendJson(res, 200, {
+          ok: false,
+          reason: 'no-gh',
+          note: 'The GitHub CLI (gh) is not installed or not authenticated — merge the PR on GitHub.',
+        });
+        return;
+      }
+
+      const remote = await run('git', ['remote', 'get-url', 'origin'], repoRoot);
+      const ownerRepo = remote.code === 0 ? parseOwnerRepo(remote.stdout.trim()) : null;
+      const repoArgs = ownerRepo ? ['--repo', ownerRepo] : [];
+      const mergeArgs = ['pr', 'merge', branch, '--squash', '--delete-branch', ...repoArgs];
+
+      let mode: 'auto' | 'immediate' = 'auto';
+      let merge = await run('gh', [...mergeArgs, '--auto'], repoRoot);
+      // If the repo doesn't allow auto-merge, retry an immediate merge (only
+      // succeeds if checks already passed).
+      if (merge.code !== 0 && /auto[- ]?merge/i.test(`${merge.stderr}${merge.stdout}`)) {
+        mode = 'immediate';
+        merge = await run('gh', mergeArgs, repoRoot);
+      }
+
+      if (merge.code !== 0) {
+        sendJson(res, 200, {
+          ok: false,
+          stage: 'merge',
+          mode,
+          branch,
+          error: (merge.stderr || merge.stdout || 'merge failed').trim(),
+          note: 'GitHub refused the merge. If feed-check is still running the PR merges when it passes (enable "Allow auto-merge" in repo settings); otherwise resolve the reported blocker on the PR.',
+        });
+        return;
+      }
+
+      sendJson(res, 200, {
+        ok: true,
+        mode,
+        branch,
+        note:
+          mode === 'auto'
+            ? 'Auto-merge enabled — GitHub will merge into ' +
+              base +
+              ' once feed-check passes, then delete the branch.'
+            : 'PR merged into ' + base + ' and branch deleted.',
+        output: (merge.stdout || merge.stderr || '').trim(),
+      });
     },
   };
 

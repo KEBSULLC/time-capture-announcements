@@ -44,6 +44,13 @@ body {
   margin: 0;
 }
 
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .columns {
   display: grid;
   grid-template-columns: 340px minmax(360px, 1fr) minmax(320px, 460px);
@@ -472,6 +479,15 @@ textarea {
 }
 .publish-actions .btn {
   flex: 1;
+}
+.btn.merge {
+  width: 100%;
+  background: #15803d;
+  color: #fff;
+  border-color: #15803d;
+}
+.btn.merge:hover:not(:disabled) {
+  filter: brightness(1.08);
 }
 .status {
   font-size: 13px;
