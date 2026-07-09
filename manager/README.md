@@ -196,6 +196,16 @@ guidance):** add a branch ruleset on `main` requiring the `feed-check /
 validate` status check to pass, and blocking force-pushes and deletion. That
 turns the CI gate from an after-the-fact detector into a merge gate.
 
+> **Enable "Require branches to be up to date before merging" (strict status
+> checks).** Without it, two feed PRs opened from the same base can *both* pass
+> `feed-check` and merge in sequence — the second silently reverting the first
+> (a lost update). Strict mode forces the second PR to rebase onto the merged
+> `main` (and re-run `feed-check`) before it can merge, so nothing is
+> overwritten. For a solo author publishing one change at a time this is
+> invisible; it only asks you to **Update branch** when you deliberately have
+> two PRs open at once. (A GitHub *merge queue* solves the same problem and is
+> the better fit at higher volume, but it's overkill here.)
+
 ## Develop / test
 
 ```bash
