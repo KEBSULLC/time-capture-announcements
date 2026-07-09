@@ -33,6 +33,23 @@
         }
       ],
       "published_at": "2026-07-09T04:41:57.024Z"
+    },
+    {
+      "id": "ad-2026-07-09",
+      "category": "ad",
+      "severity": "info",
+      "audience": "all",
+      "min_version": null,
+      "max_version": null,
+      "title": "Amazon affiliate program link",
+      "body": "Buy some stuff from Amazon and support our little venture here.",
+      "links": [
+        {
+          "label": "Amazon Business Books",
+          "url": "https://amzn.to/4wDT6Dv"
+        }
+      ],
+      "published_at": "2026-07-09T04:53:57.516Z"
     }
   ]
 }
