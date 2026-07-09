@@ -2,6 +2,7 @@
   "announcements": [
     {
       "id": "welcome-2026-05",
+      "category": "general",
       "severity": "info",
       "audience": "all",
       "min_version": null,
@@ -15,6 +16,23 @@
         }
       ],
       "published_at": "2026-05-14T00:00:00.000Z"
+    },
+    {
+      "id": "security-2026-07-09",
+      "category": "security",
+      "severity": "critical",
+      "audience": "all",
+      "min_version": null,
+      "max_version": null,
+      "title": "Security announcement test",
+      "body": "This is a test.  If there was a real emergency, I'd panic!",
+      "links": [
+        {
+          "label": "Test",
+          "url": "https://remind-em.com"
+        }
+      ],
+      "published_at": "2026-07-09T04:41:57.024Z"
     }
   ]
 }
