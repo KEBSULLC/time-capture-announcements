@@ -20,7 +20,7 @@ a few minutes).
 |-------|--------|
 | **Feed editor** | Loads the current `feed.json`, lists entries, and lets you **create / edit / delete / reorder** them. A form per entry covers every field (id, category, severity, audience, version range, links, dates) with live validation. |
 | **Preview** | Shows how the selected entry will behave in the app: `security` → **blocking modal** (all tiers); `ad` → **daily pop** (Lite ad-supported) with an Upgrade button; `general` → **inbox** item. Title/body render as **plain text** — no HTML injection, mirroring the app's safe render. Also shows which tiers the entry is visible to (severity/audience rules) and the version range. |
-| **Publish** | **Publish → open PR** writes `feed.json`, commits it on a short-lived `feed/update-<timestamp>` branch, pushes that branch, and opens a pull request into `main` (via the `gh` CLI if available, otherwise it returns a ready "open PR" link). It then returns your working tree to the branch you were on — nothing lands directly on `main`, so the `feed-check` gate always runs before merge. **Save feed.json** just writes the file (for a manual commit). Only `feed.json` is ever staged. |
+| **Publish** | **Publish → open PR** builds a `feed/update-<timestamp>` branch **off the latest `origin/main`** (fetched first) containing **only** the `feed.json` change, pushes it, and opens a pull request into `main` (via the `gh` CLI if available, otherwise it returns a ready "open PR" link). It uses git plumbing, so it **never touches your working tree or current branch** — the PR can't pick up unrelated local commits, and nothing lands on `main` outside the `feed-check` gate. **Save feed.json** just writes the file to disk (for a manual commit). |
 
 The emitted JSON is deterministic (canonical key order, 2-space indent,
 trailing newline) so a bad publish is a one-line `git revert`.
@@ -64,9 +64,12 @@ the owner's own machine:
 ### Publishing flow (branch → PR → merge)
 
 1. `npm run dev`, edit / add / reorder entries. Errors block publish; warnings
-   are advisory guardrails.
-2. Click **Publish → open PR**. The tool pushes a `feed/update-<timestamp>`
-   branch and opens (or links you to) a pull request into `main`.
+   are advisory guardrails. (The tool bases the PR on `origin/main`, so you
+   don't have to be on `main` or have it pulled — but pulling first keeps what
+   you see in the editor in step with the live feed.)
+2. Click **Publish → open PR**. The tool builds a `feed/update-<timestamp>`
+   branch off the latest `origin/main` and opens (or links you to) a pull
+   request into `main`.
 3. On the PR, the **`feed-check`** CI validates the feed. When it's green,
    **merge the PR**.
 4. GitHub Pages serves the new feed within a couple of minutes; running desktop
