@@ -35,6 +35,22 @@ export interface PublishResult {
   validation?: FeedValidation;
 }
 
+export interface PublishPrResult {
+  ok: boolean;
+  stage?: string;
+  opened?: boolean;
+  branch?: string;
+  base?: string;
+  /** PR URL when opened, else a compare URL to open the PR manually. */
+  url?: string;
+  isCompare?: boolean;
+  reason?: string;
+  note?: string;
+  error?: string;
+  ghError?: string | null;
+  validation?: FeedValidation;
+}
+
 export async function getFeed(): Promise<FeedResponse> {
   const res = await fetch('/api/feed');
   if (!res.ok) throw new Error(`Failed to load feed (${res.status})`);
@@ -55,6 +71,18 @@ export async function publishFeed(
   message: string,
 ): Promise<PublishResult> {
   const res = await fetch('/api/publish', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entries, message }),
+  });
+  return res.json();
+}
+
+export async function publishPr(
+  entries: AuthorEntry[],
+  message: string,
+): Promise<PublishPrResult> {
+  const res = await fetch('/api/publish-pr', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ entries, message }),

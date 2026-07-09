@@ -20,7 +20,7 @@ a few minutes).
 |-------|--------|
 | **Feed editor** | Loads the current `feed.json`, lists entries, and lets you **create / edit / delete / reorder** them. A form per entry covers every field (id, category, severity, audience, version range, links, dates) with live validation. |
 | **Preview** | Shows how the selected entry will behave in the app: `security` → **blocking modal** (all tiers); `ad` → **daily pop** (Lite ad-supported) with an Upgrade button; `general` → **inbox** item. Title/body render as **plain text** — no HTML injection, mirroring the app's safe render. Also shows which tiers the entry is visible to (severity/audience rules) and the version range. |
-| **Publish** | **Save feed.json** writes the file for a manual commit, or **Publish** writes it and runs `git add feed.json && git commit && git push` (push retried with backoff). Only `feed.json` is ever staged — never other working-tree changes. |
+| **Publish** | **Publish → open PR** writes `feed.json`, commits it on a short-lived `feed/update-<timestamp>` branch, pushes that branch, and opens a pull request into `main` (via the `gh` CLI if available, otherwise it returns a ready "open PR" link). It then returns your working tree to the branch you were on — nothing lands directly on `main`, so the `feed-check` gate always runs before merge. **Save feed.json** just writes the file (for a manual commit). Only `feed.json` is ever staged. |
 
 The emitted JSON is deterministic (canonical key order, 2-space indent,
 trailing newline) so a bad publish is a one-line `git revert`.
@@ -61,18 +61,26 @@ the owner's own machine:
 - Dependencies are kept current (`npm audit` is clean; the toolchain tracks
   Vite/Vitest majors). Run `npm audit` after dependency bumps.
 
-### Publishing flow
+### Publishing flow (branch → PR → merge)
 
-1. `npm run dev`, edit / add / reorder entries. Errors block save; warnings are
-   advisory guardrails.
-2. **Save feed.json** to write the file, or **Publish (commit + push)** to write
-   *and* push to `origin` on the current branch.
-3. GitHub Pages serves the new feed within a couple of minutes; running desktop
+1. `npm run dev`, edit / add / reorder entries. Errors block publish; warnings
+   are advisory guardrails.
+2. Click **Publish → open PR**. The tool pushes a `feed/update-<timestamp>`
+   branch and opens (or links you to) a pull request into `main`.
+3. On the PR, the **`feed-check`** CI validates the feed. When it's green,
+   **merge the PR**.
+4. GitHub Pages serves the new feed within a couple of minutes; running desktop
    apps pick it up on next startup.
 
-> Publish pushes to whatever branch is checked out. For the live feed that is
-> the repo's Pages branch (`main`). If you're iterating on a working branch,
-> use **Save feed.json** and commit manually, or switch to `main` first.
+> **`gh` CLI (optional but recommended):** if the [GitHub CLI](https://cli.github.com/)
+> is installed and authenticated (`gh auth login`), the PR is opened
+> automatically and the tool shows a "View pull request" link. Without it, the
+> tool still pushes the branch and shows an "Open pull request" compare link to
+> click. Either way the branch → PR → gate flow is preserved.
+>
+> This flow is what makes the `main` ruleset (require `feed-check`, require a PR)
+> frictionless: you never push to `main` directly, so a bad feed can't slip
+> past CI.
 
 ---
 

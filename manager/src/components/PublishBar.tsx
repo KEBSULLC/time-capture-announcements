@@ -8,7 +8,7 @@ interface Props {
   warningCount: number;
   busy: boolean;
   message: string;
-  status: { kind: 'ok' | 'error' | 'info'; text: string } | null;
+  status: { kind: 'ok' | 'error' | 'info'; text: string; url?: string } | null;
   onMessage: (m: string) => void;
   onSave: () => void;
   onPublish: () => void;
@@ -65,16 +65,25 @@ export function PublishBar({
           className="btn primary"
           disabled={blocked || busy || !git?.isRepo}
           onClick={onPublish}
-          title="Write, commit & push to GitHub Pages"
+          title="Write feed.json, push a branch & open a pull request into main"
         >
-          {busy ? 'Working…' : 'Publish (commit + push)'}
+          {busy ? 'Working…' : 'Publish → open PR'}
         </button>
       </div>
 
       {blocked && (
         <p className="muted small">Fix all errors before saving or publishing.</p>
       )}
-      {status && <div className={`status ${status.kind}`}>{status.text}</div>}
+      {status && (
+        <div className={`status ${status.kind}`}>
+          <div>{status.text}</div>
+          {status.url && (
+            <a className="status-link" href={status.url} target="_blank" rel="noopener noreferrer">
+              {status.url.includes('/compare/') ? 'Open pull request →' : 'View pull request →'}
+            </a>
+          )}
+        </div>
+      )}
     </div>
   );
 }

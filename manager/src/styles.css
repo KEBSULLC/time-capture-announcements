@@ -490,6 +490,12 @@ textarea {
   background: #dbeafe;
   color: #1d4ed8;
 }
+.status-link {
+  display: inline-block;
+  margin-top: 6px;
+  font-weight: 600;
+  color: inherit;
+}
 code {
   background: #eef0f3;
   padding: 0 4px;

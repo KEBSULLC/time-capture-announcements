@@ -75,6 +75,36 @@ async function writeFeed(feedPath: string, entries: AuthorEntry[]) {
   return { wrote: true, validation };
 }
 
+/** Extract "owner/repo" from a git remote URL (https, ssh, or proxied http). */
+export function parseOwnerRepo(remote: string): string | null {
+  let s = remote.trim().replace(/\.git$/, '');
+  const ssh = s.match(/^[^@\s]+@[^:]+:(.+)$/);
+  if (ssh) {
+    s = ssh[1]!;
+  } else {
+    const url = s.match(/^[a-z][a-z0-9+.-]*:\/\/[^/]+\/(.+)$/i);
+    if (url) s = url[1]!;
+  }
+  const parts = s.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  return parts.slice(-2).join('/');
+}
+
+function branchTimestamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(
+    d.getMinutes(),
+  )}${p(d.getSeconds())}`;
+}
+
+function compareUrl(ownerRepo: string | null, base: string, branch: string): string | null {
+  if (!ownerRepo) return null;
+  return `https://github.com/${ownerRepo}/compare/${encodeURIComponent(
+    base,
+  )}...${encodeURIComponent(branch)}?expand=1`;
+}
+
 export function feedApi(options: FeedApiOptions): Plugin {
   const repoRoot = path.resolve(options.repoRoot);
   const feedPath = path.resolve(options.feedPath ?? path.join(repoRoot, 'feed.json'));
@@ -111,6 +141,126 @@ export function feedApi(options: FeedApiOptions): Plugin {
         return;
       }
       sendJson(res, 200, { ok: true, feedPath, validation });
+    },
+
+    // Publish via a short-lived branch + PR (Option C). Writes feed.json,
+    // creates a `feed/update-<ts>` branch off the current HEAD, commits +
+    // pushes it, and opens a PR into `base` (via `gh` if available, else it
+    // returns a ready compare URL). Leaves the working tree back on the
+    // original branch so nothing lands directly on main.
+    'POST /api/publish-pr': async (req, res) => {
+      const body = (await readBody(req)) as {
+        entries?: AuthorEntry[];
+        message?: string;
+        base?: string;
+      };
+      const entries = Array.isArray(body.entries) ? body.entries : [];
+      const message = (body.message ?? '').trim() || 'Update announcement feed';
+      const base = (body.base ?? '').trim() || 'main';
+
+      const { wrote, validation } = await writeFeed(feedPath, entries);
+      if (!wrote) {
+        sendJson(res, 400, { ok: false, stage: 'validation', validation });
+        return;
+      }
+
+      const status = await gitStatus(repoRoot, feedRel);
+      if (!status.isRepo) {
+        sendJson(res, 200, {
+          ok: true,
+          opened: false,
+          reason: 'not-a-git-repo',
+          note: 'feed.json was written; commit and open a PR manually.',
+        });
+        return;
+      }
+
+      const original = status.branch ?? 'HEAD';
+      const branch = `feed/update-${branchTimestamp()}`;
+
+      const checkout = await run('git', ['checkout', '-b', branch], repoRoot);
+      if (checkout.code !== 0) {
+        sendJson(res, 500, { ok: false, stage: 'branch', error: checkout.stderr || checkout.stdout });
+        return;
+      }
+
+      await run('git', ['add', '--', feedRel], repoRoot);
+      const staged = await run('git', ['diff', '--cached', '--quiet', '--', feedRel], repoRoot);
+      if (staged.code === 0) {
+        // Nothing changed — tear the branch back down and report cleanly.
+        await run('git', ['checkout', original], repoRoot);
+        await run('git', ['branch', '-D', branch], repoRoot);
+        sendJson(res, 200, {
+          ok: true,
+          opened: false,
+          reason: 'no-changes',
+          note: 'feed.json already matches HEAD; nothing to publish.',
+        });
+        return;
+      }
+
+      const commit = await run('git', ['commit', '-m', message, '--', feedRel], repoRoot);
+      if (commit.code !== 0) {
+        await run('git', ['checkout', '-f', original], repoRoot);
+        await run('git', ['branch', '-D', branch], repoRoot);
+        sendJson(res, 500, { ok: false, stage: 'commit', error: commit.stderr || commit.stdout });
+        return;
+      }
+
+      let push: RunResult | null = null;
+      const delays = [0, 2000, 4000, 8000, 16000];
+      for (let attempt = 0; attempt < delays.length; attempt++) {
+        if (delays[attempt]) await sleep(delays[attempt]!);
+        push = await run('git', ['push', '-u', 'origin', branch], repoRoot);
+        if (push.code === 0) break;
+      }
+
+      // Return the working tree to where the user was, regardless of push result.
+      await run('git', ['checkout', original], repoRoot);
+
+      if (!push || push.code !== 0) {
+        sendJson(res, 502, {
+          ok: false,
+          stage: 'push',
+          branch,
+          error: push?.stderr || push?.stdout || 'push failed',
+          note: `The commit is on local branch ${branch} — push it and open a PR manually.`,
+        });
+        return;
+      }
+
+      // Resolve owner/repo from the origin remote for the PR / compare URL.
+      const remote = await run('git', ['remote', 'get-url', 'origin'], repoRoot);
+      const ownerRepo = remote.code === 0 ? parseOwnerRepo(remote.stdout.trim()) : null;
+      const cmp = compareUrl(ownerRepo, base, branch);
+
+      // Try to open the PR with the GitHub CLI; fall back to the compare URL.
+      let prUrl: string | null = null;
+      let ghError: string | null = null;
+      const ghArgs = ['pr', 'create', '--base', base, '--head', branch, '--title', message, '--body', `Automated feed update from the Feed Manager.\n\nBranch: ${branch}`];
+      if (ownerRepo) ghArgs.push('--repo', ownerRepo);
+      const gh = await run('gh', ghArgs, repoRoot);
+      if (gh.code === 0) {
+        prUrl = gh.stdout.trim().split('\n').filter(Boolean).pop() ?? null;
+      } else {
+        ghError = (gh.stderr || gh.stdout || '').trim() || null;
+      }
+
+      sendJson(res, 200, {
+        ok: true,
+        opened: prUrl !== null,
+        branch,
+        base,
+        url: prUrl ?? cmp,
+        isCompare: prUrl === null,
+        note:
+          prUrl !== null
+            ? 'Pull request opened. feed-check will validate it; merge when green.'
+            : cmp
+              ? 'Branch pushed. Open the pull request from the link (gh CLI not available or not authed).'
+              : `Branch ${branch} pushed. Open a PR into ${base} manually.`,
+        ghError,
+      });
     },
 
     'POST /api/publish': async (req, res) => {

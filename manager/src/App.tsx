@@ -3,14 +3,14 @@ import type { AuthorEntry } from './schema/types.js';
 import { emptyEntry } from './schema/types.js';
 import { validateFeed } from './schema/authoring.js';
 import { serializeFeed } from './schema/serialize.js';
-import { getFeed, saveFeed, publishFeed } from './api.js';
+import { getFeed, saveFeed, publishPr } from './api.js';
 import type { GitInfo } from './api.js';
 import { EntryList } from './components/EntryList.js';
 import { EntryForm } from './components/EntryForm.js';
 import { Preview } from './components/Preview.js';
 import { PublishBar } from './components/PublishBar.js';
 
-type Status = { kind: 'ok' | 'error' | 'info'; text: string } | null;
+type Status = { kind: 'ok' | 'error' | 'info'; text: string; url?: string } | null;
 
 export function App() {
   const [entries, setEntries] = useState<AuthorEntry[]>([]);
@@ -100,16 +100,12 @@ export function App() {
     setBusy(true);
     setStatus(null);
     try {
-      const res = await publishFeed(entries, message);
-      if (res.ok && res.pushed) {
-        setSavedSnapshot(serialized);
-        setStatus({
-          kind: 'ok',
-          text: `Published to ${res.branch}. GitHub Pages will serve the update within a few minutes.`,
-        });
-      } else if (res.ok && !res.committed) {
-        setSavedSnapshot(serialized);
+      const res = await publishPr(entries, message);
+      if (res.ok && res.reason === 'no-changes') {
         setStatus({ kind: 'info', text: res.note ?? 'Nothing to publish.' });
+      } else if (res.ok) {
+        setSavedSnapshot(serialized);
+        setStatus({ kind: 'ok', text: res.note ?? 'Published.', url: res.url });
       } else {
         setStatus({
           kind: 'error',
