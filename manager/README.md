@@ -139,6 +139,32 @@ test should fail.
 
 ---
 
+## Guardrails — protecting `main`
+
+The feed on `main` is what every install fetches, so two layers guard it:
+
+1. **The tool won't emit an invalid feed.** Save/Publish are refused while any
+   entry has a blocking error (the API returns `400`).
+2. **CI validates `feed.json` on every PR into `main`.** The `feed-check`
+   workflow (`.github/workflows/feed-check.yml`) runs `npm run check:feed`,
+   which reuses the *same* vendored parser + validator and **fails** if the
+   feed is unparseable, if the app would silently drop any entry (missing
+   id/title), or if any schema rule is violated (bad enum, non-https link,
+   invalid/inverted version range, duplicate id, bad date). No path filter, so
+   it always runs — which lets it be a **required status check**.
+
+Run it yourself anytime:
+
+```bash
+npm run check:feed          # validates ../feed.json
+FEED_PATH=/path/to/feed.json npm run check:feed
+```
+
+**Recommended repo setting (must be done in GitHub — see the repo-root
+guidance):** add a branch ruleset on `main` requiring the `feed-check /
+validate` status check to pass, and blocking force-pushes and deletion. That
+turns the CI gate from an after-the-fact detector into a merge gate.
+
 ## Develop / test
 
 ```bash
@@ -160,6 +186,7 @@ manager/
 ├── index.html
 ├── vite.config.ts          # Vite + the local feed API plugin
 ├── server/feedApi.ts       # dev-server middleware: load / save / publish (git)
+├── scripts/check-feed.ts   # CI gate: validate feed.json against the schema
 └── src/
     ├── App.tsx             # editor shell + state
     ├── api.ts              # client → /api/* helpers
