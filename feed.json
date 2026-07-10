@@ -50,6 +50,23 @@
         }
       ],
       "published_at": "2026-07-09T04:53:57.516Z"
+    },
+    {
+      "id": "ad-2026-07-10",
+      "category": "ad",
+      "severity": "info",
+      "audience": "all",
+      "min_version": null,
+      "max_version": null,
+      "title": "Ad 2",
+      "body": "IS this going to work?\n\nIf you want to stop seeing ads check out our upgrade options!",
+      "links": [
+        {
+          "label": "Amazon books",
+          "url": "https://amzn.to/4wDT6Dv"
+        }
+      ],
+      "published_at": "2026-07-10T17:21:20.099Z"
     }
   ]
 }
