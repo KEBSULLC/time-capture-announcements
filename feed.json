@@ -76,7 +76,7 @@
       "min_version": null,
       "max_version": null,
       "title": "This is fun #3",
-      "body": "Ad 3\n\nBuy some stuff or upgrade, please!",
+      "body": "Ad 3\n\nBuy some stuff or upgrade please!",
       "links": [
         {
           "label": "Books",
@@ -84,6 +84,23 @@
         }
       ],
       "published_at": "2026-07-10T17:23:28.391Z"
+    },
+    {
+      "id": "general-2026-01-10",
+      "category": "general",
+      "severity": "important",
+      "audience": "paid",
+      "min_version": null,
+      "max_version": null,
+      "title": "New stuff is coming",
+      "body": "I just want to let you know that we care.",
+      "links": [
+        {
+          "label": "website",
+          "url": "https://remind-em.com"
+        }
+      ],
+      "published_at": "2026-07-10T17:32:24.999Z"
     }
   ]
 }
